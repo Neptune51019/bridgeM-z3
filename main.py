@@ -1,23 +1,10 @@
-# BridgeM Z3 Backend
-# Receives compiled Z3 Python code, executes it, returns results
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import subprocess
-import json
-import sys
-import os
-import tempfile
+import subprocess, json, sys, os, tempfile
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 class Z3Request(BaseModel):
     z3_code: str
@@ -25,59 +12,45 @@ class Z3Request(BaseModel):
 
 @app.post("/run_z3")
 async def run_z3(req: Z3Request):
-    # Write Z3 code to temp file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(req.z3_code)
         tmp_path = f.name
-
     try:
-        # Execute with timeout
         result = subprocess.run(
             [sys.executable, tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=req.timeout
+            capture_output=True, text=True, timeout=req.timeout
         )
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
 
         if result.returncode != 0:
-            # Z3 error — parse what went wrong
-            return {
-                "status": "ERROR",
-                "error": result.stderr[:500],
-                "contradictions": [],
-                "soft_violations": [],
-                "model": {}
-            }
+            return {"status": "ERROR", "error": stderr[:500],
+                    "contradictions": [], "soft_violations": [], "model": {}}
 
-        # Parse JSON output from Z3 script
-        output_text = result.stdout.strip()
-        if not output_text:
-            return {
-                "status": "NO_OUTPUT",
-                "contradictions": [],
-                "soft_violations": [],
-                "model": {}
-            }
+        if not stdout:
+            return {"status": "NO_OUTPUT", "contradictions": [], "soft_violations": [], "model": {}}
 
-        parsed = json.loads(output_text)
-        return parsed
+        # Find the JSON line — Z3 output may have extra lines before the JSON
+        json_output = None
+        for line in reversed(stdout.split('\n')):
+            line = line.strip()
+            if line.startswith('{'):
+                try:
+                    json_output = json.loads(line)
+                    break
+                except:
+                    continue
+
+        if json_output:
+            return json_output
+
+        return {"status": "PARSE_ERROR", "error": "No JSON found in output",
+                "raw_output": stdout[:300], "contradictions": [], "soft_violations": [], "model": {}}
 
     except subprocess.TimeoutExpired:
-        return {
-            "status": "TIMEOUT",
-            "contradictions": [],
-            "soft_violations": [],
-            "model": {}
-        }
-    except json.JSONDecodeError as e:
-        return {
-            "status": "PARSE_ERROR",
-            "error": str(e),
-            "raw_output": result.stdout[:300] if result else "",
-            "contradictions": [],
-            "soft_violations": [],
-            "model": {}
-        }
+        return {"status": "TIMEOUT", "contradictions": [], "soft_violations": [], "model": {}}
+    except Exception as e:
+        return {"status": "EXCEPTION", "error": str(e), "contradictions": [], "soft_violations": [], "model": {}}
     finally:
         os.unlink(tmp_path)
 
