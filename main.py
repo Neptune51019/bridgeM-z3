@@ -1,14 +1,19 @@
+import os
+import sys
+import json
+import tempfile
+import subprocess
+
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import subprocess, json, sys, os, tempfile
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
 
 class Z3Request(BaseModel):
     z3_code: str
     timeout: int = 30
+
 
 @app.post("/run_z3")
 async def run_z3(req: Z3Request):
@@ -24,35 +29,58 @@ async def run_z3(req: Z3Request):
         stderr = result.stderr.strip()
 
         if result.returncode != 0:
-            return {"status": "ERROR", "error": stderr[:500],
-                    "contradictions": [], "soft_violations": [], "model": {}}
+            return {
+                "status": "ERROR",
+                "error": stderr[:500],
+                "contradictions": [], "soft_violations": [], "model": {}
+            }
 
         if not stdout:
-            return {"status": "NO_OUTPUT", "contradictions": [], "soft_violations": [], "model": {}}
+            return {
+                "status": "NO_OUTPUT",
+                "contradictions": [], "soft_violations": [], "model": {}
+            }
 
-        # Find the JSON line — Z3 output may have extra lines before the JSON
+        # Try every line looking for valid JSON with a status field
         json_output = None
-        for line in reversed(stdout.split('\n')):
+        for line in stdout.split('\n'):
             line = line.strip()
             if line.startswith('{'):
                 try:
-                    json_output = json.loads(line)
-                    break
-                except:
+                    parsed = json.loads(line)
+                    if 'status' in parsed:
+                        json_output = parsed
+                        break
+                except Exception:
                     continue
 
         if json_output:
             return json_output
 
-        return {"status": "PARSE_ERROR", "error": "No JSON found in output",
-                "raw_output": stdout[:300], "contradictions": [], "soft_violations": [], "model": {}}
+        # Fallback: parse sat/unsat plain text
+        last_line = stdout.split('\n')[-1].strip()
+        if last_line == 'sat':
+            return {"status": "CONSISTENT", "contradictions": [], "soft_violations": [], "model": {}}
+        elif last_line == 'unsat':
+            return {"status": "CONTRADICTION_DETECTED", "contradictions": ["Z3 found contradiction"], "soft_violations": [], "model": {}}
+
+        return {
+            "status": "PARSE_ERROR",
+            "error": "No JSON found in output",
+            "raw_output": stdout[:300],
+            "contradictions": [], "soft_violations": [], "model": {}
+        }
 
     except subprocess.TimeoutExpired:
         return {"status": "TIMEOUT", "contradictions": [], "soft_violations": [], "model": {}}
     except Exception as e:
         return {"status": "EXCEPTION", "error": str(e), "contradictions": [], "soft_violations": [], "model": {}}
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
 
 @app.get("/health")
 def health():
